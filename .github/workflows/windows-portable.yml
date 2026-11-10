@@ -59,7 +59,20 @@ jobs:
           export SystemDrive="$SYSTEMDRIVE"
           export SystemRoot="$SYSTEMROOT"
           export windir="$WINDIR"
-          vcpkg install --triplet "${TRIPLET}" bzip2 zlib getopt dirent botan
+          # Botan’s portfile downloads a patch from GitHub. A 429 on that
+          # request is transient; retry the install before failing the job.
+          ok=0
+          for attempt in 1 2 3; do
+            if vcpkg install --triplet "${TRIPLET}" bzip2 zlib getopt dirent botan; then
+              ok=1
+              break
+            fi
+            echo "vcpkg install attempt ${attempt} failed"
+            sleep $((attempt * 20))
+          done
+          if [[ "${ok}" != 1 ]]; then
+            exit 1
+          fi
 
       - name: Upload vcpkg logs on failure
         if: failure()
