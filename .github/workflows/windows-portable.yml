@@ -1,0 +1,143 @@
+# Unsigned x64 Windows portable zip of RNP.
+# Push trigger is limited to pr/windows-portable-build. Manual dispatch is
+# supported; the job runs only on that same branch.
+
+name: windows-portable
+
+on:
+  push:
+    branches:
+      - 'pr/windows-portable-build'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: windows-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_DIR: C:/vcpkg
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\cache
+  RNP_TEST_DATA: ${{ github.workspace }}\src\tests\data
+  TRIPLET: x64-windows
+
+jobs:
+  portable:
+    name: windows-2022 x64 portable (botan, shared)
+    if: github.ref == 'refs/heads/pr/windows-portable-build'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+          lfs: true
+          fetch-depth: 1
+
+      - name: vcpkg parameters
+        shell: bash
+        run: |
+          vcpkg version >> vcpkg.version
+          mkdir -p "${VCPKG_DEFAULT_BINARY_CACHE}"
+
+      - name: vcpkg cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-portable-${{ hashFiles('vcpkg.version') }}-${{ env.TRIPLET }}-v143-botan
+
+      - name: vcpkg packages
+        shell: bash
+        run: |
+          dir_u=$(cygpath -u "${VCPKG_DIR}")
+          echo "VCPKG_DIR_U=${dir_u}" >> "$GITHUB_ENV"
+          # See https://github.com/microsoft/vcpkg/issues/41339#issuecomment-2394308597
+          export SystemDrive="$SYSTEMDRIVE"
+          export SystemRoot="$SYSTEMROOT"
+          export windir="$WINDIR"
+          vcpkg install --triplet "${TRIPLET}" bzip2 zlib getopt dirent botan
+
+      - name: Upload vcpkg logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vcpkg-error-logs
+          path: |
+            C:\vcpkg\buildtrees\*\*.log
+            C:\vcpkg\installed\vcpkg\issue_body.md
+
+      - name: Select Visual Studio generator
+        shell: bash
+        run: |
+          ver=$(cmd //c 'C:\ProgramData\Chocolatey\bin\vswhere.exe -latest -products * -property installationVersion' | tr -d '\r')
+          major=${ver%%.*}
+          case "$major" in
+            17) gen="Visual Studio 17 2022";;
+            18) gen="Visual Studio 18 2026";;
+            *)  echo "Unsupported Visual Studio version: '$ver'" >&2; exit 1;;
+          esac
+          echo "Detected Visual Studio $ver -> $gen"
+          echo "CMAKE_GENERATOR=$gen" >> "$GITHUB_ENV"
+
+      - name: Configure
+        shell: bash
+        run: |
+          echo CORES="$(nproc --all)" >> "$GITHUB_ENV"
+          export PATH="${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          TOOLSET_ARG=""
+          if [[ "$CMAKE_GENERATOR" != *"18 2026"* ]]; then
+            TOOLSET_ARG="-T v143"
+          fi
+          cmake -B build -G "$CMAKE_GENERATOR" \
+            -A x64 \
+            $TOOLSET_ARG \
+            -DBUILD_SHARED_LIBS=ON \
+            -DENABLE_SANITIZERS=OFF \
+            -DCRYPTO_BACKEND=botan \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_DIR}/scripts/buildsystems/vcpkg.cmake" \
+            .
+
+      - name: Build
+        shell: bash
+        run: |
+          export PATH="${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          cmake --build build --parallel "${CORES}" --config Release
+
+      - name: Test
+        shell: bash
+        run: |
+          rnp_dll=$(find build -type f -name rnp.dll ! -path '*/CMakeFiles/*' -print -quit)
+          if [[ -z "${rnp_dll}" ]]; then
+            echo "Shared build did not produce rnp.dll" >&2
+            find build -name '*.dll' -o -name 'rnp.exe' -o -name 'rnpkeys.exe' >&2 || true
+            exit 1
+          fi
+          rnp_dll_dir=$(dirname "${rnp_dll}")
+          export PATH="${rnp_dll_dir}:${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          echo "Using DLL directory ${rnp_dll_dir}"
+          rnp_exe=$(find build/src/rnp -type f -name rnp.exe -print -quit)
+          rnpkeys_exe=$(find build/src/rnpkeys -type f -name rnpkeys.exe -print -quit)
+          "${rnp_exe}" --version
+          "${rnpkeys_exe}" --version
+          mkdir -p "build/Testing/Temporary"
+          cp "cmake/CTestCostData.txt" "build/Testing/Temporary"
+          ctest --parallel 1 --test-dir build -C Release --output-on-failure -E '_slow$'
+
+      - name: Package portable zip
+        shell: pwsh
+        run: ./ci/package_windows_portable.ps1 -Mode package
+
+      - name: Smoke-test extracted zip
+        shell: pwsh
+        run: ./ci/package_windows_portable.ps1 -Mode smoke
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: rnp-windows-x64-portable
+          path: rnp-windows-x64-portable.zip
+          if-no-files-found: error
