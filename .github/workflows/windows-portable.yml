@@ -120,9 +120,23 @@ jobs:
             find build -name '*.dll' -o -name 'rnp.exe' -o -name 'rnpkeys.exe' >&2 || true
             exit 1
           fi
-          rnp_dll_dir=$(dirname "${rnp_dll}")
+          rnp_dll_dir=$(dirname "$(cygpath -u "$(realpath "${rnp_dll}")")")
           gtest_bin="$(cygpath -u "${GITHUB_WORKSPACE}")/build/bin/Release"
-          export PATH="${gtest_bin}:${rnp_dll_dir}:${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          vcpkg_bin="${VCPKG_DIR_U}/installed/${TRIPLET}/bin"
+          # Tests and examples launch rnp.exe from another working directory.
+          # Windows loads DLLs from the executable's directory before PATH, and a
+          # relative PATH entry is resolved against that working directory.
+          copy_runtime() {
+            local dest="$1"
+            mkdir -p "${dest}"
+            cp -f "${rnp_dll_dir}/"*.dll "${dest}/"
+            cp -f "${vcpkg_bin}/"*.dll "${dest}/"
+          }
+          copy_runtime "build/src/rnp"
+          copy_runtime "build/src/rnpkeys"
+          copy_runtime "build/src/examples"
+          copy_runtime "build/src/tests/Release"
+          export PATH="${gtest_bin}:${rnp_dll_dir}:${vcpkg_bin}:${PATH}"
           echo "Using DLL directory ${rnp_dll_dir}"
           rnp_exe=$(find build/src/rnp -type f -name rnp.exe -print -quit)
           rnpkeys_exe=$(find build/src/rnpkeys -type f -name rnpkeys.exe -print -quit)
