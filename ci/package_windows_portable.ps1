@@ -11,6 +11,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Native tools write status to stderr. Do not turn that into a terminating error;
+# callers check $LASTEXITCODE instead.
+$PSNativeCommandUseErrorActionPreference = $false
 
 $Workspace = $env:GITHUB_WORKSPACE
 if (-not $Workspace) { $Workspace = (Get-Location).Path }
@@ -114,10 +117,22 @@ function Find-BuildOutput {
     $hits = @(Get-ChildItem -Path $build -Recurse -Filter $Name -File | Where-Object {
             $_.FullName -notmatch '\\CMakeFiles\\' -and $_.FullName -notmatch '\\tests\\'
         })
-    if ($hits.Count -lt 1) { throw "Build output not found: $Name" }
-    $preferred = @($hits | Where-Object { $_.FullName -match '\\Release\\' -or $_.Directory.Name -in @('rnp', 'rnpkeys') })
-    if ($preferred.Count -ge 1) { return $preferred[0].FullName }
-    return $hits[0].FullName
+    if ($hits.Count -lt 1) {
+        Write-Host "Build tree under ${build}:"
+        Get-ChildItem $build -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+            Select-Object -First 80 |
+            ForEach-Object { Write-Host $_.FullName }
+        throw "Build output not found: $Name"
+    }
+    # Prefer the link output over copies made beside test executables.
+    $ranked = @($hits | Sort-Object { $_.FullName.Length }, { $_.FullName })
+    $libRelease = @($ranked | Where-Object { $_.FullName -match '\\src\\lib\\Release\\' })
+    if ($libRelease.Count -ge 1) { return $libRelease[0].FullName }
+    $release = @($ranked | Where-Object { $_.FullName -match '\\Release\\' })
+    if ($release.Count -ge 1) { return $release[0].FullName }
+    $cli = @($ranked | Where-Object { $_.Directory.Name -in @('rnp', 'rnpkeys', 'examples') })
+    if ($cli.Count -ge 1) { return $cli[0].FullName }
+    return $ranked[0].FullName
 }
 
 function Resolve-Dependency {
@@ -131,11 +146,16 @@ function Resolve-Dependency {
         return $null
     }
     foreach ($dir in $SearchDirs) {
+        if (-not $dir) { continue }
         $candidate = Join-Path $dir $Name
         if (Test-Path -LiteralPath $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
     }
-    $system = Join-Path $env:SystemRoot "System32\$Name"
-    if (Test-Path -LiteralPath $system) { return $null }
+    foreach ($extra in @('System32', 'System32\downlevel')) {
+        $system = Join-Path (Join-Path $env:SystemRoot $extra) $Name
+        if (Test-Path -LiteralPath $system) { return $null }
+    }
+    Write-Host "Could not resolve ${Name}. Searched:"
+    foreach ($dir in $SearchDirs) { Write-Host "  $dir" }
     throw "Unresolved non-system dependency: $Name"
 }
 
@@ -154,7 +174,9 @@ function Copy-VcpkgLicenseForDll {
         $owns = $false
         foreach ($line in $lines) {
             $norm = $line.Replace('\', '/')
-            if ($norm -notmatch '/debug/bin/' -and ($norm.EndsWith($needle) -or $line.EndsWith($needleWin))) {
+            if ($norm -notmatch '/debug/bin/' -and (
+                    $norm.EndsWith($needle, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $line.EndsWith($needleWin, [System.StringComparison]::OrdinalIgnoreCase))) {
                 $owns = $true
                 break
             }
@@ -309,6 +331,14 @@ function Package-Portable {
     $rnpExe = Find-BuildOutput 'rnp.exe'
     $rnpKeys = Find-BuildOutput 'rnpkeys.exe'
     $rnpDll = Find-BuildOutput 'rnp.dll'
+    Write-Host "Packaging rnp.exe from $rnpExe"
+    Write-Host "Packaging rnpkeys.exe from $rnpKeys"
+    Write-Host "Packaging rnp.dll from $rnpDll"
+    if (-not (Test-Path -LiteralPath $VcpkgBin)) {
+        throw "vcpkg bin directory not found: $VcpkgBin"
+    }
+    Write-Host "vcpkg bin ${VcpkgBin}:"
+    Get-ChildItem $VcpkgBin -Filter '*.dll' -File | ForEach-Object { Write-Host "  $($_.Name)" }
     Copy-Item -LiteralPath $rnpExe -Destination (Join-Path $Stage 'rnp.exe')
     Copy-Item -LiteralPath $rnpKeys -Destination (Join-Path $Stage 'rnpkeys.exe')
     Copy-Item -LiteralPath $rnpDll -Destination (Join-Path $Stage 'rnp.dll')
@@ -380,21 +410,46 @@ function Package-Portable {
     Write-NlohmannLicense (Join-Path $licenseDir 'nlohmann-json-MIT.txt')
 
     if ($bundledVc) {
-        $vcLicense = @(Get-ChildItem $crt.VersionDir -Recurse -File -Include 'license.txt', 'License.txt', 'LICENSE.txt' -ErrorAction SilentlyContinue)
+        # -Include only applies when the path itself contains a wildcard, so a
+        # -Recurse -Include search silently returns nothing on these images.
+        $vcLicense = @(Get-ChildItem $crt.VersionDir -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^(?i)license\.(txt|rtf)$' })
         if ($vcLicense.Count -lt 1) {
-            $vcLicense = @(Get-ChildItem (Join-Path $vs 'VC\Redist') -Recurse -File -Include 'license.txt', 'License.txt' -ErrorAction SilentlyContinue | Select-Object -First 1)
+            $redistRoot = Join-Path $vs 'VC\Redist'
+            $vcLicense = @(Get-ChildItem $redistRoot -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^(?i)license\.(txt|rtf)$' } |
+                    Select-Object -First 1)
         }
         if ($vcLicense.Count -lt 1) {
+            Write-Host "No license file under $($crt.VersionDir). Directory listing:"
+            Get-ChildItem $crt.VersionDir -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host $_.FullName }
             throw "Visual C++ runtime DLLs were bundled but no redist license file was found under $($crt.VersionDir)"
         }
         Copy-Item -LiteralPath $vcLicense[0].FullName -Destination (Join-Path $licenseDir 'msvc-runtime-license.txt')
+        Write-Host "MSVC runtime license: $($vcLicense[0].FullName)"
+    }
+
+    $stageDlls = @(Get-ChildItem $Stage -Filter '*.dll' -File | ForEach-Object { $_.Name.ToLower() })
+    foreach ($name in @(Get-PeImports (Join-Path $Stage 'rnp.dll') $dumpbin)) {
+        if ($name -match '^(?i)(api-ms-win-|ext-ms-)') { continue }
+        $inSystem = $false
+        foreach ($extra in @('System32', 'System32\downlevel')) {
+            if (Test-Path -LiteralPath (Join-Path (Join-Path $env:SystemRoot $extra) $name)) { $inSystem = $true }
+        }
+        if ($inSystem) { continue }
+        if ($stageDlls -notcontains $name.ToLower()) {
+            throw "rnp.dll import '$name' was not copied into the package. Staged DLLs: $($stageDlls -join ', ')"
+        }
     }
 
     $savedPath = $env:PATH
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     try {
-        $version = & (Join-Path $Stage 'rnp.exe') --version
-        if ($LASTEXITCODE -ne 0) { throw "rnp.exe --version failed during packaging ($LASTEXITCODE)" }
+        $version = & (Join-Path $Stage 'rnp.exe') --version 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not $version) {
+            throw "rnp.exe --version failed during packaging (exit $LASTEXITCODE): $version"
+        }
     } finally {
         $env:PATH = $savedPath
     }
@@ -436,11 +491,14 @@ function Package-Portable {
 }
 
 function Smoke-Portable {
+    if (-not $env:RUNNER_TEMP) { throw 'RUNNER_TEMP is not set' }
     if (-not (Test-Path $ZipPath)) { throw "Zip not found: $ZipPath" }
     $dest = Join-Path $env:RUNNER_TEMP 'rnp-portable-smoke'
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     Invoke-Native 'tar.exe' @('-xf', $ZipPath, '-C', $dest)
+    Write-Host 'Extracted zip:'
+    Get-ChildItem $dest -Recurse -File | ForEach-Object { Write-Host $_.FullName }
     $root = Join-Path $dest $StageName
     if (-not (Test-Path (Join-Path $root 'rnp.exe'))) {
         throw "Extracted zip has no $StageName\rnp.exe"
@@ -454,30 +512,40 @@ function Smoke-Portable {
     $payload = [Text.Encoding]::ASCII.GetBytes('portable-smoke-ok')
     [System.IO.File]::WriteAllBytes($plain, $payload)
 
+    if (-not (Test-Path -LiteralPath $home)) { throw "homedir was not created: $home" }
     $savedPath = $env:PATH
+    # Application directory is searched before PATH, so dependency DLLs must
+    # sit next to the executables. Leave only the OS directories on PATH.
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     Set-Location $env:RUNNER_TEMP
     try {
         $rnp = Join-Path $root 'rnp.exe'
         $rnpkeys = Join-Path $root 'rnpkeys.exe'
+        Write-Host "Smoke PATH=$($env:PATH)"
+        Write-Host "Smoke homedir=$home"
         Write-Host '== rnp.exe --version =='
-        & $rnp --version
-        if ($LASTEXITCODE -ne 0) { throw "rnp.exe --version failed ($LASTEXITCODE)" }
+        $verOut = & $rnp --version 2>&1
+        $verOut | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0 -or -not $verOut) { throw "rnp.exe --version failed ($LASTEXITCODE)" }
         Write-Host '== rnpkeys.exe --version =='
-        & $rnpkeys --version
-        if ($LASTEXITCODE -ne 0) { throw "rnpkeys.exe --version failed ($LASTEXITCODE)" }
+        $keysVer = & $rnpkeys --version 2>&1
+        $keysVer | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0 -or -not $keysVer) { throw "rnpkeys.exe --version failed ($LASTEXITCODE)" }
 
         Write-Host '== rnpkeys generate =='
-        & $rnpkeys --generate-key --homedir $home --userid 'Portable Smoke <smoke@example.invalid>' --password 'smoke-test' --numbits 2048 --s2k-iterations 50000 --notty
+        $genOut = & $rnpkeys --generate-key --homedir $home --userid 'Portable Smoke <smoke@example.invalid>' --password 'smoke-test' --numbits 2048 --s2k-iterations 50000 --notty 2>&1
+        $genOut | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "rnpkeys --generate-key failed ($LASTEXITCODE)" }
         if (-not (Test-Path (Join-Path $home 'pubring.gpg'))) { throw 'generate did not write pubring.gpg in --homedir' }
         if (-not (Test-Path (Join-Path $home 'secring.gpg'))) { throw 'generate did not write secring.gpg in --homedir' }
 
         Write-Host '== rnp encrypt =='
-        & $rnp --homedir $home --encrypt --recipient 'smoke@example.invalid' --armor --overwrite --output $enc $plain
+        $encOut = & $rnp --homedir $home --encrypt --recipient 'smoke@example.invalid' --armor --overwrite --output $enc $plain 2>&1
+        $encOut | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "rnp --encrypt failed ($LASTEXITCODE)" }
         Write-Host '== rnp decrypt =='
-        & $rnp --homedir $home --decrypt --password 'smoke-test' --overwrite --output $dec $enc
+        $decOut = & $rnp --homedir $home --decrypt --password 'smoke-test' --overwrite --output $dec $enc 2>&1
+        $decOut | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "rnp --decrypt failed ($LASTEXITCODE)" }
         $got = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($dec))
         $want = [Convert]::ToBase64String($payload)
