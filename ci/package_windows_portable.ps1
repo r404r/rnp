@@ -58,14 +58,30 @@ function Get-CrtDirectories {
     param([string]$VsRoot)
     $redist = Join-Path $VsRoot 'VC\Redist\MSVC'
     if (-not (Test-Path $redist)) { throw "MSVC redist directory not found: $redist" }
-    $latest = Get-ChildItem $redist -Directory | Sort-Object Name -Descending | Select-Object -First 1
-    if (-not $latest) { throw "No MSVC redist version under $redist" }
-    $x64 = Join-Path $latest.FullName 'x64'
-    $dirs = @(Get-ChildItem $x64 -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    if ($dirs.Count -lt 1) { throw "No x64 redist folders under $x64" }
+    # VS 2022 also has an empty-or-alias v143 directory next to the numbered
+    # 14.x redist. Use a folder that actually contains x64 runtime files.
+    $usable = @()
+    foreach ($ver in (Get-ChildItem $redist -Directory)) {
+        $x64 = Join-Path $ver.FullName 'x64'
+        if (-not (Test-Path $x64)) { continue }
+        $sub = @(Get-ChildItem $x64 -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        $dlls = @(Get-ChildItem $x64 -Filter '*.dll' -File -ErrorAction SilentlyContinue)
+        if ($sub.Count -gt 0) {
+            $usable += [pscustomobject]@{ Name = $ver.Name; VersionDir = $ver.FullName; Dirs = $sub }
+        } elseif ($dlls.Count -gt 0) {
+            $usable += [pscustomobject]@{ Name = $ver.Name; VersionDir = $ver.FullName; Dirs = @($x64) }
+        }
+    }
+    if ($usable.Count -lt 1) {
+        Write-Host "Redist tree under ${redist}:"
+        Get-ChildItem $redist -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+        throw "No MSVC x64 redistributable folders under $redist"
+    }
+    $best = $usable | Sort-Object Name -Descending | Select-Object -First 1
+    Write-Host "Using MSVC redist $($best.VersionDir)"
     return @{
-        VersionDir = $latest.FullName
-        Dirs       = $dirs
+        VersionDir = $best.VersionDir
+        Dirs       = $best.Dirs
     }
 }
 
