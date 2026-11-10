@@ -25,7 +25,7 @@ $VcpkgBin = Join-Path $VcpkgInstalled 'bin'
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string]$File,
-        [Parameter(ValueFromRemainingArguments = $true)][string[]]$ArgumentList
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList
     )
     & $File @ArgumentList
     if ($LASTEXITCODE -ne 0) {
@@ -389,7 +389,7 @@ function Package-Portable {
     $licenseCount = @(Get-ChildItem $licenseDir -File).Count
     if ($licenseCount -lt 4) { throw "Expected license files, found $licenseCount" }
 
-    Invoke-Native 'tar.exe' '-a' '-cf' $ZipPath '-C' $Workspace $StageName
+    Invoke-Native 'tar.exe' @('-a', '-cf', $ZipPath, '-C', $Workspace, $StageName)
     Write-Host '==== portable tree ===='
     Get-ChildItem $Stage -Recurse -File | ForEach-Object {
         '{0,12}  {1}' -f $_.Length, $_.FullName.Substring($Stage.Length + 1)
@@ -419,7 +419,7 @@ function Smoke-Portable {
     $dest = Join-Path $env:RUNNER_TEMP 'rnp-portable-smoke'
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    Invoke-Native 'tar.exe' '-xf' $ZipPath '-C' $dest
+    Invoke-Native 'tar.exe' @('-xf', $ZipPath, '-C', $dest)
     $root = Join-Path $dest $StageName
     if (-not (Test-Path (Join-Path $root 'rnp.exe'))) {
         throw "Extracted zip has no $StageName\rnp.exe"
