@@ -59,11 +59,14 @@ jobs:
           export SystemDrive="$SYSTEMDRIVE"
           export SystemRoot="$SYSTEMROOT"
           export windir="$WINDIR"
-          # Botan’s portfile downloads a patch from GitHub. A 429 on that
-          # request is transient; retry the install before failing the job.
+          # The upstream botan port downloads a CLI patch from GitHub. That
+          # request is rate limited (HTTP 429). The overlay keeps the same
+          # port and omits that download; the patch only removes Unix CLI
+          # sandbox code and is not required for the Windows library.
+          overlay=$(cygpath -w "${GITHUB_WORKSPACE}/ci/vcpkg-overlay")
           ok=0
           for attempt in 1 2 3; do
-            if vcpkg install --triplet "${TRIPLET}" bzip2 zlib getopt dirent botan; then
+            if vcpkg install --triplet "${TRIPLET}" --overlay-ports="${overlay}" bzip2 zlib getopt dirent botan; then
               ok=1
               break
             fi
