@@ -125,6 +125,11 @@ function Resolve-Dependency {
         [string]$Name,
         [string[]]$SearchDirs
     )
+    # API-set contracts are resolved by the loader on Windows 10 and later.
+    # They are not files we can ship next to the executable.
+    if ($Name -match '^(?i)(api-ms-win-|ext-ms-)') {
+        return $null
+    }
     foreach ($dir in $SearchDirs) {
         $candidate = Join-Path $dir $Name
         if (Test-Path -LiteralPath $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
