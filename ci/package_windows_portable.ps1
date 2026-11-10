@@ -520,16 +520,16 @@ function Smoke-Portable {
     if (-not (Test-Path (Join-Path $root 'rnp.exe'))) {
         throw "Extracted zip has no $StageName\rnp.exe"
     }
-    $home = Join-Path $env:RUNNER_TEMP 'rnp-portable-homedir'
-    if (Test-Path $home) { Remove-Item -Recurse -Force $home }
-    New-Item -ItemType Directory -Force -Path $home | Out-Null
+    $keydir = Join-Path $env:RUNNER_TEMP 'rnp-portable-homedir'
+    if (Test-Path $keydir) { Remove-Item -Recurse -Force $keydir }
+    New-Item -ItemType Directory -Force -Path $keydir | Out-Null
     $plain = Join-Path $env:RUNNER_TEMP 'rnp-portable-plain.txt'
     $enc = Join-Path $env:RUNNER_TEMP 'rnp-portable-plain.txt.asc'
     $dec = Join-Path $env:RUNNER_TEMP 'rnp-portable-plain.dec'
     $payload = [Text.Encoding]::ASCII.GetBytes('portable-smoke-ok')
     [System.IO.File]::WriteAllBytes($plain, $payload)
 
-    if (-not (Test-Path -LiteralPath $home)) { throw "homedir was not created: $home" }
+    if (-not (Test-Path -LiteralPath $keydir)) { throw "homedir was not created: $keydir" }
     $savedPath = $env:PATH
     # Application directory is searched before PATH, so dependency DLLs must
     # sit next to the executables. Leave only the OS directories on PATH.
@@ -539,7 +539,7 @@ function Smoke-Portable {
         $rnp = Join-Path $root 'rnp.exe'
         $rnpkeys = Join-Path $root 'rnpkeys.exe'
         Write-Host "Smoke PATH=$($env:PATH)"
-        Write-Host "Smoke homedir=$home"
+        Write-Host "Smoke homedir=$keydir"
         Write-Host '== rnp.exe --version =='
         $verOut = & $rnp --version 2>&1
         $verOut | ForEach-Object { Write-Host $_ }
@@ -550,18 +550,18 @@ function Smoke-Portable {
         if ($LASTEXITCODE -ne 0 -or -not $keysVer) { throw "rnpkeys.exe --version failed ($LASTEXITCODE)" }
 
         Write-Host '== rnpkeys generate =='
-        $genOut = & $rnpkeys --generate-key --homedir $home --userid 'Portable Smoke <smoke@example.invalid>' --password 'smoke-test' --numbits 2048 --s2k-iterations 50000 --notty 2>&1
+        $genOut = & $rnpkeys --generate-key --homedir $keydir --userid 'Portable Smoke <smoke@example.invalid>' --password 'smoke-test' --numbits 2048 --s2k-iterations 50000 --notty 2>&1
         $genOut | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "rnpkeys --generate-key failed ($LASTEXITCODE)" }
-        if (-not (Test-Path (Join-Path $home 'pubring.gpg'))) { throw 'generate did not write pubring.gpg in --homedir' }
-        if (-not (Test-Path (Join-Path $home 'secring.gpg'))) { throw 'generate did not write secring.gpg in --homedir' }
+        if (-not (Test-Path (Join-Path $keydir 'pubring.gpg'))) { throw 'generate did not write pubring.gpg in --homedir' }
+        if (-not (Test-Path (Join-Path $keydir 'secring.gpg'))) { throw 'generate did not write secring.gpg in --homedir' }
 
         Write-Host '== rnp encrypt =='
-        $encOut = & $rnp --homedir $home --encrypt --recipient 'smoke@example.invalid' --armor --overwrite --output $enc $plain 2>&1
+        $encOut = & $rnp --homedir $keydir --encrypt --recipient 'smoke@example.invalid' --armor --overwrite --output $enc $plain 2>&1
         $encOut | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "rnp --encrypt failed ($LASTEXITCODE)" }
         Write-Host '== rnp decrypt =='
-        $decOut = & $rnp --homedir $home --decrypt --password 'smoke-test' --overwrite --output $dec $enc 2>&1
+        $decOut = & $rnp --homedir $keydir --decrypt --password 'smoke-test' --overwrite --output $dec $enc 2>&1
         $decOut | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw "rnp --decrypt failed ($LASTEXITCODE)" }
         $got = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($dec))
