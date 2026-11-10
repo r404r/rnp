@@ -414,19 +414,37 @@ function Package-Portable {
         $vcLicense = @(Get-ChildItem $crt.VersionDir -Recurse -File -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -match '^(?i)license\.(txt|rtf)$' })
         if ($vcLicense.Count -lt 1) {
-            $redistRoot = Join-Path $vs 'VC\Redist'
-            $vcLicense = @(Get-ChildItem $redistRoot -Recurse -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match '^(?i)license\.(txt|rtf)$' } |
-                    Select-Object -First 1)
+            $licenseRoot = Join-Path $vs 'Licenses'
+            if (Test-Path $licenseRoot) {
+                $vcLicense = @(Get-ChildItem $licenseRoot -Recurse -File -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -match '^(?i)license\.(txt|rtf|htm|html)$' } |
+                        Select-Object -First 1)
+            }
         }
-        if ($vcLicense.Count -lt 1) {
-            Write-Host "No license file under $($crt.VersionDir). Directory listing:"
-            Get-ChildItem $crt.VersionDir -Recurse -Depth 2 -ErrorAction SilentlyContinue |
-                ForEach-Object { Write-Host $_.FullName }
-            throw "Visual C++ runtime DLLs were bundled but no redist license file was found under $($crt.VersionDir)"
+        $notice = Join-Path $licenseDir 'msvc-runtime-license.txt'
+        if ($vcLicense.Count -ge 1) {
+            Copy-Item -LiteralPath $vcLicense[0].FullName -Destination $notice
+            Write-Host "MSVC runtime license: $($vcLicense[0].FullName)"
+        } else {
+            # The numbered CRT folder on the runner contains the DLLs and no
+            # separate license text. Record where the binaries came from.
+            $crtDir = @($crt.Dirs | Where-Object { $_ -match 'Microsoft\.VC143\.CRT' } | Select-Object -First 1)
+            if (-not $crtDir) { $crtDir = $crt.VersionDir }
+            $note = @"
+Microsoft Visual C++ runtime (VC143)
+
+The Visual C++ runtime DLLs in this archive were copied from:
+$crtDir
+
+That directory does not include a separate license file. These binaries are
+the Visual C++ Redistributable runtime. Their redistribution is covered by
+the Visual Studio license terms:
+https://visualstudio.microsoft.com/license-terms/
+https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution
+"@
+            [System.IO.File]::WriteAllText($notice, $note.Replace("`n", "`r`n"))
+            Write-Host "Wrote MSVC runtime license notice (no license file beside the CRT DLLs)"
         }
-        Copy-Item -LiteralPath $vcLicense[0].FullName -Destination (Join-Path $licenseDir 'msvc-runtime-license.txt')
-        Write-Host "MSVC runtime license: $($vcLicense[0].FullName)"
     }
 
     $stageDlls = @(Get-ChildItem $Stage -Filter '*.dll' -File | ForEach-Object { $_.Name.ToLower() })
