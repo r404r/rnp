@@ -104,7 +104,11 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          export PATH="${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          # Shared builds also build googletest as DLLs under build/bin.
+          # gtest_discover_tests launches rnp_tests.exe from MSBuild, and that
+          # executable does not sit next to gtest_main.dll.
+          gtest_bin="$(cygpath -u "${GITHUB_WORKSPACE}")/build/bin/Release"
+          export PATH="${gtest_bin}:${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
           cmake --build build --parallel "${CORES}" --config Release
 
       - name: Test
@@ -117,7 +121,8 @@ jobs:
             exit 1
           fi
           rnp_dll_dir=$(dirname "${rnp_dll}")
-          export PATH="${rnp_dll_dir}:${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          gtest_bin="$(cygpath -u "${GITHUB_WORKSPACE}")/build/bin/Release"
+          export PATH="${gtest_bin}:${rnp_dll_dir}:${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
           echo "Using DLL directory ${rnp_dll_dir}"
           rnp_exe=$(find build/src/rnp -type f -name rnp.exe -print -quit)
           rnpkeys_exe=$(find build/src/rnpkeys -type f -name rnpkeys.exe -print -quit)
