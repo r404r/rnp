@@ -212,31 +212,30 @@ function Copy-KnownPortLicense {
         [hashtable]$CopiedPorts
     )
     if ($CopiedPorts.ContainsKey($Port)) { return }
-    $candidates = @(
-        (Join-Path $VcpkgInstalled "share\$Port\copyright"),
-        (Join-Path $VcpkgRoot "installed\$Triplet\share\$Port\copyright")
-    )
-    foreach ($path in $candidates) {
-        if (Test-Path -LiteralPath $path) {
-            Copy-Item -LiteralPath $path -Destination (Join-Path $LicenseDir "vcpkg-$Port.txt")
-            $CopiedPorts[$Port] = $true
-            Write-Host "License for port $Port"
-            return
-        }
+    # A DLL may be owned by a more specific port than the name we installed.
+    # getopt.dll is shipped by getopt-win32, which already satisfies getopt.
+    foreach ($have in @($CopiedPorts.Keys)) {
+        if ($have -like "$Port*" -or $Port -like "$have*") { return }
     }
     $share = Join-Path $VcpkgInstalled 'share'
-    $found = @(Get-ChildItem $share -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$Port*" })
-    if ($found.Count -eq 1) {
-        $path = Join-Path $found[0].FullName 'copyright'
-        if (Test-Path -LiteralPath $path) {
-            Copy-Item -LiteralPath $path -Destination (Join-Path $LicenseDir "vcpkg-$($found[0].Name).txt")
-            $CopiedPorts[$found[0].Name] = $true
-            Write-Host "License for port $($found[0].Name)"
+    $portDir = Join-Path $share $Port
+    if (Test-Path -LiteralPath $portDir) {
+        $lic = @(Get-ChildItem $portDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^(?i)(copyright|license|copying)' } |
+                Select-Object -First 1)
+        if ($lic.Count -ge 1) {
+            Copy-Item -LiteralPath $lic[0].FullName -Destination (Join-Path $LicenseDir "vcpkg-$Port.txt")
+            $CopiedPorts[$Port] = $true
+            Write-Host "License for port $Port ($($lic[0].Name))"
             return
         }
+        Write-Host "Files in ${portDir}:"
+        Get-ChildItem $portDir -Force | ForEach-Object { Write-Host "  $($_.Name)" }
     }
     Write-Host "Share directories:"
-    Get-ChildItem $share -Directory | ForEach-Object { Write-Host $_.Name }
+    if (Test-Path $share) {
+        Get-ChildItem $share -Directory | ForEach-Object { Write-Host $_.Name }
+    }
     throw "Missing vcpkg copyright for port $Port"
 }
 
