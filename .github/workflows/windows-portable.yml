@@ -183,7 +183,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum rnp-windows-x64-portable.zip | tr -d '\r' > rnp-windows-x64-portable.zip.sha256
+          # Git Bash sha256sum defaults to binary mode ("<hex> *name").
+          # Keep only the digest, then write the text-mode line sha256sum -c expects.
+          raw=$(sha256sum -b rnp-windows-x64-portable.zip | tr -d '\r')
+          echo "sha256sum -b: ${raw}"
+          hash=$(printf '%s\n' "${raw}" | cut -d' ' -f1 | tr -d '*\r')
+          if [[ ! "${hash}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "SHA256 digest is not 64 lowercase hex: ${hash}" >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "${hash}" rnp-windows-x64-portable.zip > rnp-windows-x64-portable.zip.sha256
           grep -Eq '^[0-9a-f]{64}  rnp-windows-x64-portable\.zip$' rnp-windows-x64-portable.zip.sha256
           cat rnp-windows-x64-portable.zip.sha256
 
