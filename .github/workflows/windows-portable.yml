@@ -9,6 +9,15 @@ on:
     branches:
       - 'pr/windows-portable-build'
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish a GitHub prerelease from this build'
+        type: boolean
+        default: false
+      tag:
+        description: 'Release tag, e.g. v0.18.1-win.1; defaults to v<version.txt>-win.1'
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -170,9 +179,107 @@ jobs:
         shell: pwsh
         run: ./ci/package_windows_portable.ps1 -Mode smoke
 
+      - name: Checksum portable zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum rnp-windows-x64-portable.zip | tr -d '\r' > rnp-windows-x64-portable.zip.sha256
+          grep -Eq '^[0-9a-f]{64}  rnp-windows-x64-portable\.zip$' rnp-windows-x64-portable.zip.sha256
+          cat rnp-windows-x64-portable.zip.sha256
+
       - name: Upload portable zip
         uses: actions/upload-artifact@v7
         with:
           name: rnp-windows-x64-portable
-          path: rnp-windows-x64-portable.zip
+          path: |
+            rnp-windows-x64-portable.zip
+            rnp-windows-x64-portable.zip.sha256
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub prerelease
+    needs: portable
+    if: github.event_name == 'workflow_dispatch' && inputs.create_release == true && github.ref == 'refs/heads/pr/windows-portable-build'
+    runs-on: ubuntu-latest
+    # contents: write creates the tag and the release. actions: read is
+    # required by actions/download-artifact; a job permissions block replaces
+    # the workflow permissions, so it is set here as well.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Download portable artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: rnp-windows-x64-portable
+          path: dist
+
+      - name: Resolve and validate tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < version.txt)
+          tag="${{ inputs.tag }}"
+          if [[ -z "${tag}" ]]; then
+            tag="v${version}-win.1"
+          fi
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-win\.[0-9]+$ ]]; then
+            echo "Tag does not match ^v[0-9]+.[0-9]+.[0-9]+-win.[0-9]+$: ${tag}" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Fail if the tag already exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+            echo "Tag already exists: ${tag}" >&2
+            exit 1
+          fi
+
+      - name: Verify checksum
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -c rnp-windows-x64-portable.zip.sha256
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          git config user.name "r404r"
+          git config user.email "r404r@users.noreply.github.com"
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${tag}"
+
+      - name: Create prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          version="${{ steps.tag.outputs.version }}"
+          printf '%s\n\n%s\n' \
+            "Unofficial unsigned x64 portable build from r404r/rnp branch pr/windows-portable-build at commit ${GITHUB_SHA}." \
+            "This is not an official rnpgp/rnp release. Windows SmartScreen may warn. The SHA256 is in the attached .sha256 file." \
+            > release-notes.md
+          gh release create "${tag}" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "RNP ${version} Windows x64 portable (unofficial)" \
+            --notes-file release-notes.md \
+            dist/rnp-windows-x64-portable.zip \
+            dist/rnp-windows-x64-portable.zip.sha256
