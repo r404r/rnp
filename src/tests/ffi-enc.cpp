@@ -1151,10 +1151,10 @@ TEST_F(rnp_tests, test_ffi_decrypt_v6_skesk_test_vectors)
         assert_rnp_success(rnp_op_verify_create(&verify, ffi, input, output));
         assert_rnp_success(rnp_op_verify_execute(verify));
         assert_string_equal(file_to_str("decrypted").c_str(), "Hello, world!");
-        assert_int_equal(unlink("decrypted"), 0);
         rnp_input_destroy(input);
         rnp_output_destroy(output);
         rnp_op_verify_destroy(verify);
+        assert_int_equal(unlink("decrypted"), 0);
     }
 
     assert_rnp_success(rnp_input_from_path(&input, "data/RFC9580/A.10.5.v6_skesk_ocb.asc"));
@@ -1162,10 +1162,10 @@ TEST_F(rnp_tests, test_ffi_decrypt_v6_skesk_test_vectors)
     assert_rnp_success(rnp_op_verify_create(&verify, ffi, input, output));
     assert_rnp_success(rnp_op_verify_execute(verify));
     assert_string_equal(file_to_str("decrypted").c_str(), "Hello, world!");
-    assert_int_equal(unlink("decrypted"), 0);
     rnp_input_destroy(input);
     rnp_output_destroy(output);
     rnp_op_verify_destroy(verify);
+    assert_int_equal(unlink("decrypted"), 0);
 
     rnp_ffi_destroy(ffi);
 }
@@ -1344,11 +1344,11 @@ TEST_F(rnp_tests, test_ffi_argon2_locked_seckey)
     assert_rnp_success(rnp_output_to_path(&output, "decrypted"));
     assert_rnp_success(rnp_decrypt(ffi, input, output));
     assert_string_equal(file_to_str("decrypted").c_str(), "Hello, world!");
+    rnp_input_destroy(input);
+    rnp_output_destroy(output);
     assert_int_equal(unlink("decrypted"), 0);
 
     // cleanup
-    rnp_input_destroy(input);
-    rnp_output_destroy(output);
     rnp_ffi_destroy(ffi);
 }
 
@@ -1384,6 +1384,8 @@ TEST_F(rnp_tests, test_ffi_decrypt_argon2_skesk)
         assert_rnp_success(rnp_op_verify_create(&verify, ffi, input, output));
         assert_rnp_success(rnp_op_verify_execute(verify));
         assert_string_equal(file_to_str("decrypted").c_str(), expect_plaintext);
+        rnp_input_destroy(input);
+        rnp_output_destroy(output);
         assert_int_equal(unlink("decrypted"), 0);
 
         /* Check protection info */
@@ -1403,8 +1405,6 @@ TEST_F(rnp_tests, test_ffi_decrypt_argon2_skesk)
 
         // cleanup
         rnp_op_verify_destroy(verify);
-        rnp_input_destroy(input);
-        rnp_output_destroy(output);
         rnp_ffi_destroy(ffi);
     }
 }
