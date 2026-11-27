@@ -520,6 +520,25 @@ function Smoke-Portable {
     if (-not (Test-Path (Join-Path $root 'rnp.exe'))) {
         throw "Extracted zip has no $StageName\rnp.exe"
     }
+    Write-Host '== DLL dependencies of extracted files =='
+    $dumpbin = Get-Dumpbin -VsRoot (Get-VsInstallPath)
+    $missing = @()
+    foreach ($bin in @(Get-ChildItem $root -File | Where-Object { $_.Extension -in @('.exe', '.dll') })) {
+        $imports = @(Get-PeImports -Path $bin.FullName -Dumpbin $dumpbin)
+        Write-Host "$($bin.Name): $($imports -join ', ')"
+        foreach ($imp in $imports) {
+            if ($imp -match '^(?i)(api-ms-win-|ext-ms-)') { continue }
+            if (Test-Path -LiteralPath (Join-Path $root $imp)) { continue }
+            if (Test-Path -LiteralPath (Join-Path (Join-Path $env:SystemRoot 'System32') $imp)) { continue }
+            $missing += "$($bin.Name) -> $imp"
+        }
+    }
+    if ($missing.Count -gt 0) {
+        $missing | ForEach-Object { Write-Host "Missing: $_" }
+        throw 'Extracted zip has unresolved DLL dependencies'
+    }
+    Write-Host 'All non-system DLL dependencies are present in the zip'
+
     $keydir = Join-Path $env:RUNNER_TEMP 'rnp-portable-homedir'
     if (Test-Path $keydir) { Remove-Item -Recurse -Force $keydir }
     New-Item -ItemType Directory -Force -Path $keydir | Out-Null
@@ -569,6 +588,34 @@ function Smoke-Portable {
         if ($got -ne $want) {
             throw "decrypted bytes do not match plaintext"
         }
+
+        Write-Host '== rnp sign (inline) =='
+        $signed = Join-Path $env:RUNNER_TEMP 'rnp-portable-plain.txt.gpg'
+        $signOut = & $rnp --homedir $keydir --sign --password 'smoke-test' --overwrite --output $signed $plain 2>&1
+        $signOut | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw "rnp --sign failed ($LASTEXITCODE)" }
+        Write-Host '== rnp verify (inline) =='
+        $verOut = & $rnp --homedir $keydir --verify $signed 2>&1
+        $verOut | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw "rnp --verify of inline signature failed ($LASTEXITCODE)" }
+
+        Write-Host '== rnp sign (detached) =='
+        $sig = Join-Path $env:RUNNER_TEMP 'rnp-portable-plain.txt.sig'
+        $detOut = & $rnp --homedir $keydir --sign --detach --password 'smoke-test' --overwrite --output $sig $plain 2>&1
+        $detOut | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw "rnp --sign --detach failed ($LASTEXITCODE)" }
+        Write-Host '== rnp verify (detached) =='
+        $verOut = & $rnp --homedir $keydir --verify $sig --source $plain 2>&1
+        $verOut | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw "rnp --verify of detached signature failed ($LASTEXITCODE)" }
+
+        Write-Host '== rnp verify (detached, modified data must fail) =='
+        $tampered = Join-Path $env:RUNNER_TEMP 'rnp-portable-tampered.txt'
+        [System.IO.File]::WriteAllBytes($tampered, [Text.Encoding]::ASCII.GetBytes('portable-smoke-bad'))
+        $badOut = & $rnp --homedir $keydir --verify $sig --source $tampered 2>&1
+        $badOut | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -eq 0) { throw 'rnp --verify accepted a signature over modified data' }
+
         Write-Host 'SMOKE_OK'
     } finally {
         $env:PATH = $savedPath

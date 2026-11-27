@@ -1,6 +1,6 @@
 # Unsigned x64 Windows portable zip of RNP.
-# Push trigger is limited to pr/windows-portable-build. Manual dispatch is
-# supported; the job runs only on that same branch.
+# Push trigger is limited to pr/windows-portable-build branches. Manual
+# dispatch is supported; the job runs only on those same branches.
 
 name: windows-portable
 
@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - 'pr/windows-portable-build'
+      - 'pr/windows-portable-build-*'
   workflow_dispatch:
     inputs:
       create_release:
@@ -15,7 +16,7 @@ on:
         type: boolean
         default: false
       tag:
-        description: 'Release tag, e.g. v0.18.1-win.1; defaults to v<version.txt>-win.1'
+        description: 'Release tag, e.g. v0.18.1-win.2; defaults to v<version.txt>-win.1'
         type: string
         required: false
 
@@ -36,7 +37,7 @@ env:
 jobs:
   portable:
     name: windows-2022 x64 portable (botan, shared)
-    if: github.ref == 'refs/heads/pr/windows-portable-build'
+    if: (github.ref == 'refs/heads/pr/windows-portable-build' || startsWith(github.ref, 'refs/heads/pr/windows-portable-build-'))
     runs-on: windows-2022
     timeout-minutes: 180
     steps:
@@ -208,7 +209,7 @@ jobs:
   release:
     name: Publish GitHub prerelease
     needs: portable
-    if: github.event_name == 'workflow_dispatch' && inputs.create_release == true && github.ref == 'refs/heads/pr/windows-portable-build'
+    if: github.event_name == 'workflow_dispatch' && inputs.create_release == true && (github.ref == 'refs/heads/pr/windows-portable-build' || startsWith(github.ref, 'refs/heads/pr/windows-portable-build-'))
     runs-on: ubuntu-latest
     # contents: write creates the tag and the release. actions: read is
     # required by actions/download-artifact; a job permissions block replaces
@@ -281,7 +282,7 @@ jobs:
           tag="${{ steps.tag.outputs.tag }}"
           version="${{ steps.tag.outputs.version }}"
           printf '%s\n\n%s\n' \
-            "Unofficial unsigned x64 portable build from r404r/rnp branch pr/windows-portable-build at commit ${GITHUB_SHA}." \
+            "Unofficial unsigned x64 portable build from r404r/rnp branch ${GITHUB_REF_NAME} at commit ${GITHUB_SHA}." \
             "This is not an official rnpgp/rnp release. Windows SmartScreen may warn. The SHA256 is in the attached .sha256 file." \
             > release-notes.md
           gh release create "${tag}" \
