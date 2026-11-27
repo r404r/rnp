@@ -1,0 +1,86 @@
+# Install the published Windows portable build through Scoop on a clean
+# runner and exercise the installed shims. Dispatch only; the push trigger
+# registers the workflow and the job is skipped.
+
+name: windows-portable-scoop
+
+on:
+  push:
+    branches:
+      - 'pr/windows-portable-build-*'
+    paths:
+      - '.github/workflows/windows-portable-scoop.yml'
+  workflow_dispatch:
+    inputs:
+      bucket:
+        description: 'Scoop bucket repository URL'
+        type: string
+        default: 'https://github.com/r404r/scoop-bucket'
+      version:
+        description: 'Expected manifest version, e.g. 0.18.1-win.2'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  scoop:
+    name: windows-2022 scoop install
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-RestMethod -Uri 'https://get.scoop.sh' -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin
+          "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Add bucket and install rnp
+        shell: pwsh
+        env:
+          BUCKET_URL: ${{ inputs.bucket }}
+          WANT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          scoop bucket add r404r $env:BUCKET_URL
+          scoop cat r404r/rnp
+          scoop install r404r/rnp
+          if ($LASTEXITCODE -ne 0) { throw "scoop install failed ($LASTEXITCODE)" }
+          $info = scoop info r404r/rnp
+          $info | Out-String | Write-Host
+          $installed = (scoop list rnp | Where-Object { $_.Name -eq 'rnp' }).Version
+          Write-Host "Installed version: $installed"
+          if ($installed -ne $env:WANT_VERSION) { throw "Installed version '$installed' is not '$env:WANT_VERSION'" }
+
+      - name: Run installed rnp through Scoop shims
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # Use the shims from a directory that is not the app directory.
+          Set-Location $env:RUNNER_TEMP
+          # PowerShell aliases rnp to Rename-ItemProperty; call the .exe shim.
+          (Get-Command rnp.exe).Source | Write-Host
+          (Get-Command rnpkeys.exe).Source | Write-Host
+          function Run([string]$exe, [string[]]$a) {
+            & $exe @a 2>&1 | ForEach-Object { Write-Host $_ }
+            if ($LASTEXITCODE -ne 0) { throw "$exe $($a -join ' ') failed ($LASTEXITCODE)" }
+          }
+          $home2 = Join-Path $env:RUNNER_TEMP 'scoop-rnp-home'
+          New-Item -ItemType Directory -Force -Path $home2 | Out-Null
+          $plain = Join-Path $env:RUNNER_TEMP 'msg.txt'
+          [System.IO.File]::WriteAllBytes($plain, [Text.Encoding]::ASCII.GetBytes('scoop-smoke-ok'))
+          Run rnp.exe @('--version')
+          Run rnpkeys.exe @('--version')
+          Run rnpkeys.exe @('--generate-key', '--homedir', $home2, '--userid', 'Scoop Smoke <scoop@example.invalid>', '--password', 'pw', '--numbits', '2048', '--notty')
+          Run rnpkeys.exe @('--homedir', $home2, '--list-keys')
+          Run rnp.exe @('--homedir', $home2, '--encrypt', '--recipient', 'scoop@example.invalid', '--armor', '--overwrite', '--output', "$plain.asc", $plain)
+          Run rnp.exe @('--homedir', $home2, '--decrypt', '--password', 'pw', '--overwrite', '--output', "$plain.dec", "$plain.asc")
+          if ((Get-FileHash $plain).Hash -ne (Get-FileHash "$plain.dec").Hash) { throw 'decrypted output differs' }
+          Run rnp.exe @('--homedir', $home2, '--sign', '--detach', '--password', 'pw', '--overwrite', '--output', "$plain.sig", $plain)
+          Run rnp.exe @('--homedir', $home2, '--verify', "$plain.sig", '--source', $plain)
+          Write-Host 'SCOOP_SMOKE_OK'
