@@ -620,6 +620,9 @@ function Smoke-Portable {
     } finally {
         $env:PATH = $savedPath
     }
+    # The last native command is an expected non-zero verify. Do not
+    # leak that exit code to the workflow step.
+    exit 0
 }
 
 switch ($Mode) {
