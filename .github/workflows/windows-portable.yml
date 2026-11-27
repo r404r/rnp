@@ -1,0 +1,294 @@
+# Unsigned x64 Windows portable zip of RNP.
+# Push trigger is limited to pr/windows-portable-build. Manual dispatch is
+# supported; the job runs only on that same branch.
+
+name: windows-portable
+
+on:
+  push:
+    branches:
+      - 'pr/windows-portable-build'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish a GitHub prerelease from this build'
+        type: boolean
+        default: false
+      tag:
+        description: 'Release tag, e.g. v0.18.1-win.1; defaults to v<version.txt>-win.1'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: windows-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VCPKG_DIR: C:/vcpkg
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\cache
+  RNP_TEST_DATA: ${{ github.workspace }}\src\tests\data
+  TRIPLET: x64-windows
+
+jobs:
+  portable:
+    name: windows-2022 x64 portable (botan, shared)
+    if: github.ref == 'refs/heads/pr/windows-portable-build'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+          lfs: true
+          fetch-depth: 1
+
+      - name: vcpkg parameters
+        shell: bash
+        run: |
+          vcpkg version >> vcpkg.version
+          mkdir -p "${VCPKG_DEFAULT_BINARY_CACHE}"
+
+      - name: vcpkg cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-portable-${{ hashFiles('vcpkg.version') }}-${{ env.TRIPLET }}-v143-botan
+
+      - name: vcpkg packages
+        shell: bash
+        run: |
+          dir_u=$(cygpath -u "${VCPKG_DIR}")
+          echo "VCPKG_DIR_U=${dir_u}" >> "$GITHUB_ENV"
+          # See https://github.com/microsoft/vcpkg/issues/41339#issuecomment-2394308597
+          export SystemDrive="$SYSTEMDRIVE"
+          export SystemRoot="$SYSTEMROOT"
+          export windir="$WINDIR"
+          # The upstream botan port downloads a CLI patch from GitHub. That
+          # request is rate limited (HTTP 429). The overlay keeps the same
+          # port and omits that download; the patch only removes Unix CLI
+          # sandbox code and is not required for the Windows library.
+          overlay=$(cygpath -w "${GITHUB_WORKSPACE}/ci/vcpkg-overlay")
+          ok=0
+          for attempt in 1 2 3; do
+            if vcpkg install --triplet "${TRIPLET}" --overlay-ports="${overlay}" bzip2 zlib getopt dirent botan; then
+              ok=1
+              break
+            fi
+            echo "vcpkg install attempt ${attempt} failed"
+            sleep $((attempt * 20))
+          done
+          if [[ "${ok}" != 1 ]]; then
+            exit 1
+          fi
+
+      - name: Upload vcpkg logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: vcpkg-error-logs
+          path: |
+            C:\vcpkg\buildtrees\*\*.log
+            C:\vcpkg\installed\vcpkg\issue_body.md
+
+      - name: Select Visual Studio generator
+        shell: bash
+        run: |
+          ver=$(cmd //c 'C:\ProgramData\Chocolatey\bin\vswhere.exe -latest -products * -property installationVersion' | tr -d '\r')
+          major=${ver%%.*}
+          case "$major" in
+            17) gen="Visual Studio 17 2022";;
+            18) gen="Visual Studio 18 2026";;
+            *)  echo "Unsupported Visual Studio version: '$ver'" >&2; exit 1;;
+          esac
+          echo "Detected Visual Studio $ver -> $gen"
+          echo "CMAKE_GENERATOR=$gen" >> "$GITHUB_ENV"
+
+      - name: Configure
+        shell: bash
+        run: |
+          echo CORES="$(nproc --all)" >> "$GITHUB_ENV"
+          export PATH="${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          TOOLSET_ARG=""
+          if [[ "$CMAKE_GENERATOR" != *"18 2026"* ]]; then
+            TOOLSET_ARG="-T v143"
+          fi
+          cmake -B build -G "$CMAKE_GENERATOR" \
+            -A x64 \
+            $TOOLSET_ARG \
+            -DBUILD_SHARED_LIBS=ON \
+            -DENABLE_SANITIZERS=OFF \
+            -DCRYPTO_BACKEND=botan \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_DIR}/scripts/buildsystems/vcpkg.cmake" \
+            .
+
+      - name: Build
+        shell: bash
+        run: |
+          # Shared builds also build googletest as DLLs under build/bin.
+          # gtest_discover_tests launches rnp_tests.exe from MSBuild, and that
+          # executable does not sit next to gtest_main.dll.
+          gtest_bin="$(cygpath -u "${GITHUB_WORKSPACE}")/build/bin/Release"
+          export PATH="${gtest_bin}:${VCPKG_DIR_U}/installed/${TRIPLET}/bin:${PATH}"
+          cmake --build build --parallel "${CORES}" --config Release
+
+      - name: Test
+        shell: bash
+        run: |
+          rnp_dll=$(find build -type f -name rnp.dll ! -path '*/CMakeFiles/*' -print -quit)
+          if [[ -z "${rnp_dll}" ]]; then
+            echo "Shared build did not produce rnp.dll" >&2
+            find build -name '*.dll' -o -name 'rnp.exe' -o -name 'rnpkeys.exe' >&2 || true
+            exit 1
+          fi
+          rnp_dll_dir=$(dirname "$(cygpath -u "$(realpath "${rnp_dll}")")")
+          gtest_bin="$(cygpath -u "${GITHUB_WORKSPACE}")/build/bin/Release"
+          vcpkg_bin="${VCPKG_DIR_U}/installed/${TRIPLET}/bin"
+          # Tests and examples launch rnp.exe from another working directory.
+          # Windows loads DLLs from the executable's directory before PATH, and a
+          # relative PATH entry is resolved against that working directory.
+          copy_runtime() {
+            local dest="$1"
+            mkdir -p "${dest}"
+            cp -f "${rnp_dll_dir}/"*.dll "${dest}/"
+            cp -f "${vcpkg_bin}/"*.dll "${dest}/"
+          }
+          copy_runtime "build/src/rnp"
+          copy_runtime "build/src/rnpkeys"
+          copy_runtime "build/src/examples"
+          copy_runtime "build/src/tests/Release"
+          export PATH="${gtest_bin}:${rnp_dll_dir}:${vcpkg_bin}:${PATH}"
+          echo "Using DLL directory ${rnp_dll_dir}"
+          rnp_exe=$(find build/src/rnp -type f -name rnp.exe -print -quit)
+          rnpkeys_exe=$(find build/src/rnpkeys -type f -name rnpkeys.exe -print -quit)
+          "${rnp_exe}" --version
+          "${rnpkeys_exe}" --version
+          mkdir -p "build/Testing/Temporary"
+          cp "cmake/CTestCostData.txt" "build/Testing/Temporary"
+          ctest --parallel 1 --test-dir build -C Release --output-on-failure -E '_slow$'
+
+      - name: Package portable zip
+        shell: pwsh
+        run: ./ci/package_windows_portable.ps1 -Mode package
+
+      - name: Smoke-test extracted zip
+        shell: pwsh
+        run: ./ci/package_windows_portable.ps1 -Mode smoke
+
+      - name: Checksum portable zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Git Bash sha256sum defaults to binary mode ("<hex> *name").
+          # Keep only the digest, then write the text-mode line sha256sum -c expects.
+          raw=$(sha256sum -b rnp-windows-x64-portable.zip | tr -d '\r')
+          echo "sha256sum -b: ${raw}"
+          hash=$(printf '%s\n' "${raw}" | cut -d' ' -f1 | tr -d '*\r')
+          if [[ ! "${hash}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "SHA256 digest is not 64 lowercase hex: ${hash}" >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "${hash}" rnp-windows-x64-portable.zip > rnp-windows-x64-portable.zip.sha256
+          grep -Eq '^[0-9a-f]{64}  rnp-windows-x64-portable\.zip$' rnp-windows-x64-portable.zip.sha256
+          cat rnp-windows-x64-portable.zip.sha256
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: rnp-windows-x64-portable
+          path: |
+            rnp-windows-x64-portable.zip
+            rnp-windows-x64-portable.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub prerelease
+    needs: portable
+    if: github.event_name == 'workflow_dispatch' && inputs.create_release == true && github.ref == 'refs/heads/pr/windows-portable-build'
+    runs-on: ubuntu-latest
+    # contents: write creates the tag and the release. actions: read is
+    # required by actions/download-artifact; a job permissions block replaces
+    # the workflow permissions, so it is set here as well.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Download portable artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: rnp-windows-x64-portable
+          path: dist
+
+      - name: Resolve and validate tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < version.txt)
+          tag="${{ inputs.tag }}"
+          if [[ -z "${tag}" ]]; then
+            tag="v${version}-win.1"
+          fi
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-win\.[0-9]+$ ]]; then
+            echo "Tag does not match ^v[0-9]+.[0-9]+.[0-9]+-win.[0-9]+$: ${tag}" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Fail if the tag already exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+            echo "Tag already exists: ${tag}" >&2
+            exit 1
+          fi
+
+      - name: Verify checksum
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum -c rnp-windows-x64-portable.zip.sha256
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          git config user.name "r404r"
+          git config user.email "r404r@users.noreply.github.com"
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${tag}"
+
+      - name: Create prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          version="${{ steps.tag.outputs.version }}"
+          printf '%s\n\n%s\n' \
+            "Unofficial unsigned x64 portable build from r404r/rnp branch pr/windows-portable-build at commit ${GITHUB_SHA}." \
+            "This is not an official rnpgp/rnp release. Windows SmartScreen may warn. The SHA256 is in the attached .sha256 file." \
+            > release-notes.md
+          gh release create "${tag}" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "RNP ${version} Windows x64 portable (unofficial)" \
+            --notes-file release-notes.md \
+            dist/rnp-windows-x64-portable.zip \
+            dist/rnp-windows-x64-portable.zip.sha256
